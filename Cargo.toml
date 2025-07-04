@@ -1,0 +1,26 @@
+[package]
+name    = "try-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ctrlc        = "*"
+signal-hook  = "*"
+daemonize    = "*"
+daemonize-me = "*"
+nix          = { version = "*", features = ["signal"] }
+serde        = { version = "*", features = ["derive"] }
+toml         = "*"
+
+
+# [[bin]]
+# name = "s"
+# path = "src/bin/sock-daemon.rs"
+
+[[bin]]
+name = "c"
+path = "src/bin/sock-cli.rs"
+
+[[bin]]
+name = "pm"
+path = "src/bin/pm.rs"
