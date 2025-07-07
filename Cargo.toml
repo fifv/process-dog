@@ -11,6 +11,7 @@ daemonize-me = "*"
 nix          = { version = "*", features = ["signal"] }
 serde        = { version = "*", features = ["derive"] }
 toml         = "*"
+bincode      = "2.0.1"
 
 
 # [[bin]]
@@ -24,3 +25,15 @@ path = "src/bin/sock-cli.rs"
 [[bin]]
 name = "pm"
 path = "src/bin/pm.rs"
+
+[[bin]]
+name = "try-lock"
+path = "src/bin/try-lock.rs"
+
+[[bin]]
+name = "try-file"
+path = "src/bin/try-file.rs"
+
+[[bin]]
+name = "try-slice"
+path = "src/bin/try-slice.rs"
