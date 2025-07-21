@@ -1,0 +1,82 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        
+        {
+            "label": "cargo build",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "--release",
+                "--target=armv7-unknown-linux-musleabihf"
+            ],
+            "dependsOn":[],
+            "problemMatcher": [ ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "scp to sdk",
+            "type": "shell",
+            "command": "scp",
+            "args": [
+                "target/armv7-unknown-linux-musleabihf/release/pm",
+                "Ubuntu18:/home/fifv/v853/v853-sdk-test/target/allwinner/v853-vision/busybox-init-base-files/usr/bin",
+            ],
+            "dependsOn":["cargo build"],
+            "problemMatcher": [ ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "adb push",
+            "type": "shell",
+            "command": "adb",
+            "args": [
+                "push",
+                "target/armv7-unknown-linux-musleabihf/release/pm",
+                "/usr/bin/"
+            ],
+            "dependsOn":["cargo build"],
+            "problemMatcher": [ ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "push both",
+            "type": "shell",
+            "command": "",
+            "dependsOn":["adb push", "scp to sdk"],
+            "problemMatcher": [ ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "adb shell run",
+            "type": "shell",
+            "command": "adb",
+            "args": [
+                "shell",
+                // "/tmp/ttt",
+                "/try-camerademo",
+            ],
+            "dependsOn":["adb push"],
+            "problemMatcher": [ ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        }
+    ]
+}

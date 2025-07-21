@@ -18,9 +18,9 @@ bincode      = "2.0.1"
 # name = "s"
 # path = "src/bin/sock-daemon.rs"
 
-[[bin]]
-name = "c"
-path = "src/bin/sock-cli.rs"
+# [[bin]]
+# name = "c"
+# path = "src/bin/sock-cli.rs"
 
 [[bin]]
 name = "pm"

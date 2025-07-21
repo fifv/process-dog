@@ -1,6 +1,6 @@
 [[apps]]
-name = "1"
-path = "/do"
-args = ["ittt"]
+name = "sl"
+cmd = "sl"
+args = []
 cwd = "/"
 enabled = true

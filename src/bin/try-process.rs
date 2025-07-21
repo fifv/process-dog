@@ -1,15 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::{File, read_dir};
 use std::path::Path;
-/**
- * Design
- * - a daemon, listening on socket
- * - a cli, send to daemon via socket
- * - cli add a new process, daemon start it and add it to list
- * - daemon keep the list sync with config file
- * - if daemon start/stop, run/kill all processes on the list
- * -
- */
+
 /**
  * Design of flow
  */

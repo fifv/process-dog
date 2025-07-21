@@ -1,0 +1,267 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'c'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=c",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "c",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'c'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=c",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "c",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'pm'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=pm",
+                    "--package=try-rust",
+                ],
+                "filter": {
+                    "name": "pm",
+                    "kind": "bin"
+                }
+            },
+            "args": [ "daemon", ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'pm'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=pm",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "pm",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'try-file'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=try-file",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-file",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'try-file'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=try-file",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-file",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'try-lock'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=try-lock",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-lock",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'try-lock'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=try-lock",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-lock",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'try-process'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=try-process",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-process",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'try-process'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=try-process",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-process",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'try-rust'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=try-rust",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-rust",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'try-rust'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=try-rust",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-rust",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'try-slice'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=try-slice",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-slice",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'try-slice'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=try-slice",
+                    "--package=try-rust"
+                ],
+                "filter": {
+                    "name": "try-slice",
+                    "kind": "bin"
+                }
+            },
+            "args": [ ],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
