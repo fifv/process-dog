@@ -1,7 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::fs::{self, File};
-use std::io::Read;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -23,6 +22,15 @@ use std::{io, path};
  * - daemon keep the list sync with config file
  * - if daemon start/stop, run/kill all processes on the list
  * -
+ */
+
+/**
+ * Files:
+ *      - pm.toml               - daemon config file
+ *      - pm-daemon.out         - daemon stdout
+ *      - pm-daemon.err         - daemon stderr
+ *      - <appname>.log         - app stdout&stderr
+ *      - /tmp/pm.sock          - ipc socket between daemon and cli
  */
 
 const SOCKET_PATH: &str = "/tmp/pm.sock";
@@ -132,6 +140,413 @@ impl Config {
     }
 }
 
+struct ProcessManagerDaemon {
+    config: Arc<Mutex<Config>>,
+    processes_table: Arc<Mutex<Vec<ProcessChild>>>,
+}
+
+impl ProcessManagerDaemon {
+    pub fn new(config_filepath: &path::Path) -> ProcessManagerDaemon {
+        let new_pmd = Self {
+            config: Arc::new(Mutex::new(Config {
+                apps: vec![],
+                config_filepath: config_filepath.to_path_buf(),
+            })),
+            processes_table: Arc::new(Mutex::new(Vec::<ProcessChild>::new())),
+        };
+
+        new_pmd
+            .config
+            .lock()
+            .unwrap()
+            .load()
+            .expect("why load config failed?");
+
+
+        new_pmd.start_all_apps();
+        new_pmd.start_watchdog_loop();
+
+        new_pmd
+    }
+    pub fn start_listening(self: &Self) -> std::io::Result<()> {
+        // Remove previous socket file if it exists
+        let _ = fs::remove_file(SOCKET_PATH);
+        let listener = UnixListener::bind(SOCKET_PATH)?;
+        println!("Daemon listening on {}", SOCKET_PATH);
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let cloned_config = self.config.clone();
+                    let cloned_processes_table = self.processes_table.clone();
+                    let handler = Self {
+                        config: cloned_config,
+                        processes_table: cloned_processes_table,
+                    };
+                    /* FIXME\: thread and struct...? */
+                    thread::spawn(move || handler.handle_client(stream));
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_client(self: &Self, mut stream: UnixStream) {
+        let message: Vec<String> =
+            bincode::decode_from_std_read(&mut stream, bincode::config::standard())
+                .expect("decode_from_std_read failed, maybe interface changed?");
+
+        let (command, params) = match message.as_slice() {
+            [first, rest @ ..] => (first, rest),
+            [] => panic!("Empty message received"),
+        };
+
+        match command.as_str() {
+            "status" => {
+                let _ = writeln!(stream, "Daemon is running.");
+            }
+            "add" => {
+                if params.len() >= 2 {
+                    let app_name = &params[0];
+                    let _ = writeln!(
+                        stream,
+                        "Add new App {:?}, cmd: {:?}",
+                        app_name,
+                        &params[1..],
+                    );
+                    {
+                        let mut config = self.config.lock().unwrap();
+                        config.add_config(AppConfig {
+                            name: params[0].to_string(),
+                            cmd: params[1].to_string(),
+                            args: params[2..].to_vec(),
+                            cwd: PathBuf::from("/"), /* TODO: implement cwd */
+                            enabled: true,
+                            logdir: None,
+                        });
+                    }
+                    /* TODO: restart instead of ignore if already started */
+                    let result = self.try_start_app_by_name(app_name).unwrap_or_else(|e| e);
+                    let _ = writeln!(stream, "{result}");
+                } else {
+                    let _ = writeln!(
+                        stream,
+                        "usage: add <name> </path/to/app> <param1> <param2> ..."
+                    );
+                }
+            }
+            "remove" => {
+                // TODO:
+            }
+            /* "ls" */
+            cmd if cmd.starts_with("l") => {
+                /* TODO: show as a beautiful table */
+                let _ = writeln!(stream, "{:#?}", self.processes_table.lock().unwrap());
+                let _ = writeln!(stream, "{:#?}", self.config.lock().unwrap());
+            }
+            /* "restart" */
+            cmd if cmd.starts_with("r") => {
+                /* TODO: apply to first app if no name provided */
+                if self.config.lock().unwrap().apps.len() >= 1 {
+                    let app_name = &if params.len() >= 1 {
+                        params[0].to_string()
+                    } else {
+                        self.config.lock().unwrap().apps[0].name.clone()
+                    };
+                    let _ = writeln!(stream, "Restarting {app_name}... ");
+
+                    let result = self.try_stop_app_by_name(app_name).unwrap_or_else(|e| e);
+                    let _ = writeln!(stream, "{result}");
+
+                    let result = self.try_start_app_by_name(app_name).unwrap_or_else(|e| e);
+                    let _ = writeln!(stream, "{result}");
+                } else {
+                    // let _ = writeln!(stream, "usage: restart <name>");
+                    let _ = writeln!(stream, "No Apps available, please add with `add` first");
+                }
+            }
+            /* "enable" */
+            cmd if cmd.starts_with("e") => {
+                if self.config.lock().unwrap().apps.len() >= 1 {
+                    let app_name = &if params.len() >= 1 {
+                        params[0].to_string()
+                    } else {
+                        self.config.lock().unwrap().apps[0].name.clone()
+                    };
+
+                    let _ = writeln!(stream, "Enable {app_name}");
+                    self.config.lock().unwrap().enable(&params[0], true);
+                    let result = self.try_start_app_by_name(app_name).unwrap_or_else(|e| e);
+                    let _ = writeln!(stream, "{result}");
+                } else {
+                    // let _ = writeln!(stream, "usage: disable <name>");
+                    let _ = writeln!(stream, "No Apps available, please add with `add` first");
+                }
+            }
+            /* "disable" */
+            cmd if cmd.starts_with("d") => {
+                if self.config.lock().unwrap().apps.len() >= 1 {
+                    let app_name = &if params.len() >= 1 {
+                        params[0].to_string()
+                    } else {
+                        self.config.lock().unwrap().apps[0].name.clone()
+                    };
+
+                    let _ = writeln!(stream, "Disable {app_name}");
+                    // thread::sleep(Duration::from_millis(2000));
+                    self.config.lock().unwrap().enable(&params[0], false);
+
+                    let result = self.try_stop_app_by_name(app_name).unwrap_or_else(|e| e);
+                    let _ = writeln!(stream, "{result}");
+
+                    /* this syntax also works, but... weird? */
+                    // let _ = try_stop_process(app_name, processes_table).map_err(|e| {
+                    //     let _ = writeln!(stream, "{e}");
+                    // });
+                } else {
+                    // let _ = writeln!(stream, "usage: disable <name>");
+                    let _ = writeln!(stream, "No Apps available, please add with `add` first");
+                }
+            }
+            /* spawn all */
+            "on" => {}
+            "quit" => {
+                let _ = writeln!(stream, "Stop all...");
+                self.stop_all_apps();
+                let _ = writeln!(stream, "Bye~");
+                std::process::exit(0);
+            }
+            cmd => {
+                let _ = writeln!(stream, "Unknown command: {cmd}");
+            }
+        }
+    }
+
+    fn start_watchdog_loop(self: &Self) {
+        let cloned_config = self.config.clone();
+        let cloned_processes_table = self.processes_table.clone();
+        let handler = Self {
+            config: cloned_config,
+            processes_table: cloned_processes_table,
+        };
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(3));
+                let mut processes_table_lock = handler.processes_table.lock().unwrap();
+                for process_child in processes_table_lock.iter_mut() {
+                    if let Ok(Some(_)) = process_child.child.try_wait() {
+                        /* exited */
+                        eprintln!(
+                            "[pm][Info] {} exited! try to restart...",
+                            process_child.name
+                        );
+                        if let Some(app_config) = handler
+                            .config
+                            .lock()
+                            .unwrap()
+                            .find_config(&process_child.name)
+                        {
+                            if let Ok(child) = Self::spawn_process(
+                                &app_config.cmd,
+                                &app_config.args,
+                                app_config
+                                    .logdir
+                                    .clone()
+                                    .unwrap_or("/tmp/".into())
+                                    .join(app_config.name.clone() + ".log"),
+                            ) {
+                                process_child.child = child;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+
+    fn start_all_apps(self: &Self) {
+        let config = self.config.lock().unwrap();
+        for app_config in &config.apps {
+            let res = self.try_start_app(&app_config);
+            println!("{}", res.unwrap_or_else(|e| e));
+            match res {
+                Ok(o) => {
+                    println!("{o}");
+                }
+                Err(e) => println!("[pm][Error] {e}"),
+            }
+        }
+    }
+    fn stop_all_apps(self: &Self) {
+        let app_names: Vec<String> = {
+            let processes_table = self.processes_table.lock().unwrap();
+            let app_names = processes_table.iter().map(|p| p.name.clone()).collect();
+            app_names
+        };
+
+        for app_name in app_names {
+            let _ = self.try_stop_app_by_name(&app_name);
+        }
+    }
+
+
+    fn try_start_app_by_name(self: &Self, app_name: &str) -> Result<&'static str, &'static str> {
+        let mut config_lock = self.config.lock().unwrap();
+        let app_config = config_lock.find_config(&app_name);
+        if let Some(app_config) = app_config {
+            self.try_start_app(app_config)
+            // let _ = try_start_process(app_config, processes_table.clone());
+        } else {
+            Err("The App name can't be found in config")
+        }
+    }
+
+    /**
+     * this do some checks for you:
+     * 1. the app is enabled
+     * 2. the app is not started (i.e. not in the table)
+     */
+    fn try_start_app(self: &Self, app_config: &AppConfig) -> Result<&'static str, &'static str> {
+        let app_name = &app_config.name;
+        // let mut config_lock = config.lock().unwrap();
+        // let app_config = config_lock.find_config(&app_name);
+
+
+        // if let Some(app_config) = app_config {
+        if app_config.enabled {
+            let index_in_table = self
+                .processes_table
+                .lock()
+                .unwrap()
+                .iter()
+                .position(|process_child| &process_child.name == app_name);
+
+            if let None = index_in_table {
+                // let _ = writeln!(stream, "Let's spawn");
+                if let Ok(child) = Self::spawn_process(
+                    &app_config.cmd,
+                    &app_config.args,
+                    app_config
+                        .logdir
+                        .clone()
+                        .unwrap_or("/tmp/".into())
+                        .join(app_config.name.clone() + ".log"),
+                ) {
+                    self.processes_table.lock().unwrap().push(ProcessChild {
+                        name: app_name.to_string(),
+                        child: child,
+                    });
+                    Ok("Spawn successfully")
+                } else {
+                    Err("Spawn failed")
+                }
+            } else {
+                Err("The process has already been started")
+            }
+        } else {
+            Err("The App is disabled")
+        }
+        // } else {
+        //     Err("The App name can't be found in config")
+        // }
+    }
+
+    fn try_stop_app_by_name(self: &Self, app_name: &str) -> Result<&'static str, &'static str> {
+        let index_in_table = self
+            .processes_table
+            .lock()
+            .unwrap()
+            .iter()
+            .position(|process_child| process_child.name == app_name);
+
+        if let Some(index) = index_in_table {
+            {
+                /* ISSUE: what's this? why this keep locked? */
+                let mut table_lock = self.processes_table.lock().unwrap();
+                /* kill must borrow as mutable */
+                let _ = Self::nice_kill_process(
+                    &mut table_lock[index].child,
+                    time::Duration::from_millis(2000),
+                );
+            }
+            self.processes_table.lock().unwrap().remove(index);
+            Ok("Kill successfully")
+        } else {
+            Err("Seems not started, do nothing")
+        }
+    }
+
+    fn spawn_process<S: AsRef<OsStr>, P: AsRef<Path>, I: IntoIterator<Item = S>>(
+        program: S,
+        args: I,
+        log_file: P,
+    ) -> std::io::Result<std::process::Child> {
+        let log = File::create(log_file)?;
+        /* TODO: implement cwd */
+        Command::new(program)
+            .args(args)
+            .stdout(Stdio::from(log.try_clone()?))
+            .stderr(Stdio::from(log))
+            .spawn()
+    }
+
+    fn nice_kill_process(
+        process: &mut std::process::Child,
+        nice_wait: time::Duration,
+    ) -> Result<(), std::io::Error> {
+        fn kill_process(process: &mut std::process::Child) -> Result<(), std::io::Error> {
+            if let Ok(()) = process.kill() {
+                process.wait()?;
+            } else {
+                println!("Process {} has already exited", process.id());
+            }
+            Ok(())
+        }
+
+        let pid = nix::unistd::Pid::from_raw(process.id() as i32);
+        match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT) {
+            // match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
+            Ok(()) => {
+                let expire = time::Instant::now() + nice_wait;
+                while let Ok(None) = process.try_wait() {
+                    if time::Instant::now() > expire {
+                        break;
+                    }
+                    std::thread::sleep(nice_wait / 10);
+                }
+                if let Ok(None) = process.try_wait() {
+                    kill_process(process)?;
+                }
+            }
+            Err(nix::Error::EINVAL) => {
+                println!("Invalid signal. Killing process {}", pid);
+                kill_process(process)?;
+            }
+            Err(nix::Error::EPERM) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Insufficient permissions to signal process {}", pid),
+                ));
+            }
+            Err(nix::Error::ESRCH) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Process {} does not exist", pid),
+                ));
+            }
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unexpected error {}", e),
+                ));
+            }
+        };
+        Ok(())
+    }
+}
 
 
 fn main() -> std::io::Result<()> {
@@ -146,20 +561,20 @@ fn main() -> std::io::Result<()> {
     let params = &args[2..];
 
     if command == "daemon" {
-        start_daemon()?;
-        start_listening(
+        daemonize_self()?;
+        main_daemon(
             params
                 .get(0)
                 .map(|s| Path::new(s))
                 .unwrap_or(env::home_dir().unwrap().join("pm.toml").as_path()),
         )
     } else {
-        start_cli(command, params)
+        main_cli(command, params)
     }
 }
 
 
-fn start_cli(command: &str, params: &[String]) -> std::io::Result<()> {
+fn main_cli(command: &str, params: &[String]) -> std::io::Result<()> {
     match UnixStream::connect(SOCKET_PATH) {
         Ok(mut stream) => {
             bincode::encode_into_std_write(
@@ -201,64 +616,15 @@ fn start_cli(command: &str, params: &[String]) -> std::io::Result<()> {
 }
 
 /**
- * start by `start_daemon()`
+ *
  */
-fn start_listening(config_filepath: &path::Path) -> std::io::Result<()> {
-    let config = Arc::new(Mutex::new(Config {
-        apps: vec![],
-        config_filepath: config_filepath.to_path_buf(),
-    }));
+fn main_daemon(config_filepath: &path::Path) -> std::io::Result<()> {
+    let pmd = ProcessManagerDaemon::new(config_filepath);
+    pmd.start_listening()?;
 
-    config
-        .lock()
-        .unwrap()
-        .load()
-        .expect("why load config failed?");
-
-    let processes_table = Arc::new(Mutex::new(Vec::<ProcessChild>::new()));
-
-    // for appconfig in &config.lock().unwrap().apps {
-    //     if let Ok(child) = spawn_process(
-    //         &appconfig.cmd,
-    //         &appconfig.args,
-    //         appconfig
-    //             .logdir
-    //             .clone()
-    //             .unwrap_or("/tmp/".into())
-    //             .join(appconfig.name.clone() + ".log"),
-    //     ) {
-    //         processes_table.lock().unwrap().push(ProcessChild {
-    //             name: appconfig.name.clone(),
-    //             child: child,
-    //         });
-    //     }
-    // }
-
-    start_all(config.clone(), processes_table.clone());
-    start_watchdog_loop(config.clone(), processes_table.clone());
-
-
-    // Remove previous socket file if it exists
-    let _ = fs::remove_file(SOCKET_PATH);
-
-    let listener = UnixListener::bind(SOCKET_PATH)?;
-    println!("Daemon listening on {}", SOCKET_PATH);
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let cloned_config = config.clone();
-                let cloned_processes_table = processes_table.clone();
-                thread::spawn(move || handle_client(stream, cloned_config, cloned_processes_table));
-            }
-            Err(e) => {
-                eprintln!("Error: {e}");
-            }
-        }
-    }
     Ok(())
 }
-fn start_daemon() -> std::io::Result<()> {
+fn daemonize_self() -> std::io::Result<()> {
     println!("Try to daemonize...");
     /* TODO: better daemon log dir */
     let stdout = fs::File::create(env::home_dir().unwrap().join("pm-daemon.out")).unwrap();
@@ -286,11 +652,11 @@ fn start_daemon() -> std::io::Result<()> {
             /* ugly hack */
             if error.to_string().contains("unable to lock pid file") {
                 eprintln!("[pm][Warn] Daemon may be already started, try to restart");
-                start_cli("quit", &[])?;
+                main_cli("quit", &[])?;
                 /* TODO: wait until quit finished */
 
                 /* TODO: will this cause infinite loop? */
-                start_daemon()
+                daemonize_self()
                 // daemonize
                 //     .start()
                 //     .map(|_| ())
@@ -323,334 +689,6 @@ fn start_daemon() -> std::io::Result<()> {
     // }
 }
 
-fn handle_client(
-    mut stream: UnixStream,
-    config: Arc<Mutex<Config>>,
-    processes_table: Arc<Mutex<Vec<ProcessChild>>>,
-) {
-    let message: Vec<String> =
-        bincode::decode_from_std_read(&mut stream, bincode::config::standard())
-            .expect("decode_from_std_read failed, maybe interface changed?");
-
-    let (command, params) = match message.as_slice() {
-        [first, rest @ ..] => (first, rest),
-        [] => panic!("Empty message received"),
-    };
-
-    match command.as_str() {
-        "status" => {
-            let _ = writeln!(stream, "Daemon is running.");
-        }
-        "add" => {
-            if params.len() >= 2 {
-                let app_name = &params[0];
-                let _ = writeln!(
-                    stream,
-                    "Add new App {:?}, cmd: {:?}",
-                    app_name,
-                    &params[1..],
-                );
-                {
-                    let mut config = config.lock().unwrap();
-                    config.add_config(AppConfig {
-                        name: params[0].to_string(),
-                        cmd: params[1].to_string(),
-                        args: params[2..].to_vec(),
-                        cwd: PathBuf::from("/"), /* TODO: implement cwd */
-                        enabled: true,
-                        logdir: None,
-                    });
-                }
-                /* TODO: restart instead of ignore if already started */
-                let result = try_start_process_by_name(app_name, config, processes_table)
-                    .unwrap_or_else(|e| e);
-                let _ = writeln!(stream, "{result}");
-            } else {
-                let _ = writeln!(
-                    stream,
-                    "usage: add <name> </path/to/app> <param1> <param2> ..."
-                );
-            }
-        }
-        "remove" => {
-            // TODO:
-        }
-        cmd if cmd.starts_with("l") /* "ls" */ => {
-            /* TODO: show as a beautiful table */
-            let _ = writeln!(stream, "{:#?}", processes_table.lock().unwrap());
-            let _ = writeln!(stream, "{:#?}", config.lock().unwrap());
-        }
-        cmd if cmd.starts_with("r") /* "restart" */ => {
-            if params.len() >= 1 {
-                let app_name = &params[0];
-                let _ = writeln!(stream, "Restarting {app_name}... ");
-
-                let result =
-                    try_stop_process(app_name, processes_table.clone()).unwrap_or_else(|e| e);
-                let _ = writeln!(stream, "{result}");
-
-                let result = try_start_process_by_name(app_name, config, processes_table)
-                    .unwrap_or_else(|e| e);
-                let _ = writeln!(stream, "{result}");
-            } else {
-                let _ = writeln!(stream, "usage: restart <name>");
-            }
-        }
-        cmd if cmd.starts_with("e") /* "enable" */ => {
-            if params.len() >= 1 {
-                let app_name = &params[0];
-                let _ = writeln!(stream, "Enable {app_name}");
-                config.lock().unwrap().enable(&params[0], true);
-                let result = try_start_process_by_name(app_name, config, processes_table)
-                    .unwrap_or_else(|e| e);
-                let _ = writeln!(stream, "{result}");
-            } else {
-                let _ = writeln!(stream, "usage: disable <name>");
-            }
-        }
-        cmd if cmd.starts_with("d") /* "disable" */ => {
-            if params.len() >= 1 {
-                let app_name = &params[0];
-                let _ = writeln!(stream, "Disable {app_name}");
-                // thread::sleep(Duration::from_millis(2000));
-                config.lock().unwrap().enable(&params[0], false);
-
-                let result =
-                    try_stop_process(app_name, processes_table.clone()).unwrap_or_else(|e| e);
-                let _ = writeln!(stream, "{result}");
-
-                /* this syntax also works, but... weird? */
-                // let _ = try_stop_process(app_name, processes_table).map_err(|e| {
-                //     let _ = writeln!(stream, "{e}");
-                // });
-            } else {
-                let _ = writeln!(stream, "usage: disable <name>");
-            }
-        }
-        /* spawn all */
-        "on" => {}
-        "quit" => {
-            let _ = writeln!(stream, "Stop all...");
-            stop_all(processes_table);
-            let _ = writeln!(stream, "Bye~");
-            std::process::exit(0);
-        }
-        cmd => {
-            let _ = writeln!(stream, "Unknown command: {cmd}");
-        }
-    }
-}
-
-fn start_all(config: Arc<Mutex<Config>>, processes_table: Arc<Mutex<Vec<ProcessChild>>>) {
-    let config = config.lock().unwrap();
-    for app_config in &config.apps {
-        let res = try_start_process(&app_config, processes_table.clone());
-        println!("{}", res.unwrap_or_else(|e| e));
-        match res {
-            Ok(o) => {
-                println!("{o}");
-            }
-            Err(e) => println!("[pm][Error] {e}"),
-        }
-    }
-}
-fn stop_all(processes_table: Arc<Mutex<Vec<ProcessChild>>>) {
-    let app_names: Vec<String> = {
-        let processes_table = processes_table.lock().unwrap();
-        let app_names = processes_table.iter().map(|p| p.name.clone()).collect();
-        app_names
-    };
-
-    for app_name in app_names {
-        let _ = try_stop_process(&app_name, processes_table.clone());
-    }
-}
-
-fn try_stop_process(
-    app_name: &str,
-    processes_table: Arc<Mutex<Vec<ProcessChild>>>,
-) -> Result<&'static str, &'static str> {
-    let index_in_table = processes_table
-        .lock()
-        .unwrap()
-        .iter()
-        .position(|process_child| process_child.name == app_name);
-
-    if let Some(index) = index_in_table {
-        {
-            /* ISSUE: what's this? why this keep locked? */
-            let mut table_lock = processes_table.lock().unwrap();
-            /* kill must borrow as mutable */
-            let _ = stop_process(
-                &mut table_lock[index].child,
-                time::Duration::from_millis(2000),
-            );
-        }
-        processes_table.lock().unwrap().remove(index);
-        Ok("Kill successfully")
-    } else {
-        Err("Seems not started, do nothing")
-    }
-}
-
-fn try_start_process_by_name(
-    app_name: &str,
-    config: Arc<Mutex<Config>>,
-    processes_table: Arc<Mutex<Vec<ProcessChild>>>,
-) -> Result<&'static str, &'static str> {
-    let mut config_lock = config.lock().unwrap();
-    let app_config = config_lock.find_config(&app_name);
-    if let Some(app_config) = app_config {
-        try_start_process(app_config, processes_table.clone())
-        // let _ = try_start_process(app_config, processes_table.clone());
-    } else {
-        Err("The App name can't be found in config")
-    }
-}
-
-/**
- * this do some checks for you:
- * 1. the app is enabled
- * 2. the app is not started (i.e. not in the table)
- */
-fn try_start_process(
-    // app_name: &str,
-    // config: Arc<Mutex<Config>>,
-    app_config: &AppConfig,
-    processes_table: Arc<Mutex<Vec<ProcessChild>>>,
-) -> Result<&'static str, &'static str> {
-    let app_name = &app_config.name;
-    // let mut config_lock = config.lock().unwrap();
-    // let app_config = config_lock.find_config(&app_name);
-
-
-    // if let Some(app_config) = app_config {
-    if app_config.enabled {
-        let index_in_table = processes_table
-            .lock()
-            .unwrap()
-            .iter()
-            .position(|process_child| &process_child.name == app_name);
-
-        if let None = index_in_table {
-            // let _ = writeln!(stream, "Let's spawn");
-            if let Ok(child) = spawn_process(
-                &app_config.cmd,
-                &app_config.args,
-                app_config
-                    .logdir
-                    .clone()
-                    .unwrap_or("/tmp/".into())
-                    .join(app_config.name.clone() + ".log"),
-            ) {
-                processes_table.lock().unwrap().push(ProcessChild {
-                    name: app_name.to_string(),
-                    child: child,
-                });
-                Ok("Spawn successfully")
-            } else {
-                Err("Spawn failed")
-            }
-        } else {
-            Err("The process has already been started")
-        }
-    } else {
-        Err("The App is disabled")
-    }
-    // } else {
-    //     Err("The App name can't be found in config")
-    // }
-}
-fn start_watchdog_loop(config: Arc<Mutex<Config>>, processes_table: Arc<Mutex<Vec<ProcessChild>>>) {
-    thread::spawn(move || {
-        loop {
-            thread::sleep(Duration::from_secs(3));
-            let mut processes_table_lock = processes_table.lock().unwrap();
-            for process_child in processes_table_lock.iter_mut() {
-                if let Ok(Some(_)) = process_child.child.try_wait() {
-                    /* exited */
-                    eprintln!(
-                        "[pm][Info] {} exited! try to restart...",
-                        process_child.name
-                    );
-                    if let Some(app) = config.lock().unwrap().find_config(&process_child.name) {
-                        if let Ok(child) = spawn_process(&app.cmd, &app.args, "/tmp/aaa.log") {
-                            process_child.child = child;
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
-
-fn spawn_process<S: AsRef<OsStr>, P: AsRef<Path>, I: IntoIterator<Item = S>>(
-    program: S,
-    args: I,
-    log_file: P,
-) -> std::io::Result<std::process::Child> {
-    let log = File::create(log_file)?;
-    /* TODO: implement cwd */
-    Command::new(program)
-        .args(args)
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        .spawn()
-}
-
-fn stop_process(
-    process: &mut std::process::Child,
-    nice_wait: time::Duration,
-) -> Result<(), std::io::Error> {
-    fn kill_process(process: &mut std::process::Child) -> Result<(), std::io::Error> {
-        if let Ok(()) = process.kill() {
-            process.wait()?;
-        } else {
-            println!("Process {} has already exited", process.id());
-        }
-        Ok(())
-    }
-
-    let pid = nix::unistd::Pid::from_raw(process.id() as i32);
-    match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT) {
-        // match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
-        Ok(()) => {
-            let expire = time::Instant::now() + nice_wait;
-            while let Ok(None) = process.try_wait() {
-                if time::Instant::now() > expire {
-                    break;
-                }
-                std::thread::sleep(nice_wait / 10);
-            }
-            if let Ok(None) = process.try_wait() {
-                kill_process(process)?;
-            }
-        }
-        Err(nix::Error::EINVAL) => {
-            println!("Invalid signal. Killing process {}", pid);
-            kill_process(process)?;
-        }
-        Err(nix::Error::EPERM) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Insufficient permissions to signal process {}", pid),
-            ));
-        }
-        Err(nix::Error::ESRCH) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Process {} does not exist", pid),
-            ));
-        }
-        Err(e) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Unexpected error {}", e),
-            ));
-        }
-    };
-    Ok(())
-}
 
 fn register_sigint() -> std::io::Result<()> {
     // ctrlc::set_handler(move || {
