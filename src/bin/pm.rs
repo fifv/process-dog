@@ -15,6 +15,10 @@ use std::{io, path};
 
 
 /**
+ * TODO: move daemon log to a better place
+ * TODO: pm inspect: see logs
+ */
+/**
  * Design
  * - a daemon, listening on socket
  * - a cli, send to daemon via socket
@@ -37,6 +41,7 @@ const SOCKET_PATH: &str = "/tmp/pm.sock";
 
 use serde::{Deserialize, Serialize};
 
+
 #[derive(Debug)]
 struct ProcessChild {
     name: String,
@@ -58,6 +63,8 @@ pub struct AppConfig {
     pub cwd: path::PathBuf,
     pub enabled: bool,
     pub logdir: Option<path::PathBuf>,
+    #[serde(skip)]
+    exit_count: i32,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -145,6 +152,8 @@ struct ProcessManagerDaemon {
     processes_table: Arc<Mutex<Vec<ProcessChild>>>,
 }
 
+const DEFAULT_LOG_DIR: &str = "/tmp";
+
 impl ProcessManagerDaemon {
     pub fn new(config_filepath: &path::Path) -> ProcessManagerDaemon {
         let new_pmd = Self {
@@ -225,6 +234,7 @@ impl ProcessManagerDaemon {
                             cwd: PathBuf::from("/"), /* TODO: implement cwd */
                             enabled: true,
                             logdir: None,
+                            exit_count: 0,
                         });
                     }
                     /* TODO: restart instead of ignore if already started */
@@ -242,9 +252,102 @@ impl ProcessManagerDaemon {
             }
             /* "ls" */
             cmd if cmd.starts_with("l") => {
-                /* TODO: show as a beautiful table */
-                let _ = writeln!(stream, "{:#?}", self.processes_table.lock().unwrap());
-                let _ = writeln!(stream, "{:#?}", self.config.lock().unwrap());
+                /* TODO\: show as a beautiful table */
+                // let _ = writeln!(stream, "{:#?}", self.processes_table.lock().unwrap());
+                // let _ = writeln!(stream, "{:#?}", self.config.lock().unwrap());
+
+                if false {
+                    use prettytable::{Table, row};
+                    let mut table = Table::new();
+                    table.add_row(row!["Config Path"]);
+                    table.add_row(row![self.config.lock().unwrap().config_filepath.display()]);
+                    let _ = writeln!(stream, "{}", table);
+
+                    let mut table = Table::new();
+                    table.add_row(row![
+                        "", "Name", "Enabled", "Command", "Args", "Cwd", "Log Dir"
+                    ]);
+                    for (i, app) in self.config.lock().unwrap().apps.iter().enumerate() {
+                        table.add_row(row![
+                            i + 1,
+                            app.name,
+                            if app.enabled { "√" } else { "" },
+                            app.cmd,
+                            app.args.join(""),
+                            app.cwd.display(),
+                            app.logdir
+                                .as_ref()
+                                .unwrap_or(&PathBuf::from(DEFAULT_LOG_DIR))
+                                .display()
+                        ]);
+                    }
+                    let _ = write!(stream, "{}", table);
+                }
+
+                {
+                    use tabled::{builder::Builder, settings::Style};
+
+                    let mut b = Builder::new();
+                    b.push_column([
+                        "Config Path",
+                        self.config
+                            .lock()
+                            .unwrap()
+                            .config_filepath
+                            .display()
+                            .to_string()
+                            .as_str(),
+                    ]);
+                    let mut table = b.build();
+                    table.with(Style::modern());
+                    let _ = writeln!(stream, "{}", table);
+
+                    let mut b = Builder::new();
+                    b.push_record([
+                        "",
+                        "Name",
+                        "Enabled",
+                        "Status",
+                        "Exit Count",
+                        "Cmd",
+                        "Args",
+                        "Cwd",
+                        "Log Dir",
+                    ]);
+                    for (i, app) in self.config.lock().unwrap().apps.iter().enumerate() {
+                        b.push_record([
+                            (i + 1).to_string().as_str(),
+                            &app.name,
+                            if app.enabled { "√" } else { "" },
+                            self.processes_table
+                                .lock()
+                                .unwrap()
+                                .iter_mut()
+                                .find(|x| x.name == app.name)
+                                .map_or_else(
+                                    || "Not Started",
+                                    |process_child| match process_child.child.try_wait() {
+                                        Ok(Some(_)) => "Exited",
+                                        Ok(None) => "Running",
+                                        Err(_) => "Error",
+                                    },
+                                ),
+                            &app.exit_count.to_string(),
+                            &app.cmd,
+                            &app.args.join(""),
+                            &app.cwd.display().to_string(),
+                            &app.logdir
+                                .as_ref()
+                                .unwrap_or(&PathBuf::from(DEFAULT_LOG_DIR))
+                                .display()
+                                .to_string(),
+                        ]);
+                    }
+
+                    let mut table = b.build();
+                    table.with(Style::modern());
+                    let _ = writeln!(stream, "{}", table);
+                }
             }
             /* "restart" */
             cmd if cmd.starts_with("r") => {
@@ -277,7 +380,7 @@ impl ProcessManagerDaemon {
                     };
 
                     let _ = writeln!(stream, "Enable {app_name}");
-                    self.config.lock().unwrap().enable(&params[0], true);
+                    self.config.lock().unwrap().enable(app_name, true);
                     let result = self.try_start_app_by_name(app_name).unwrap_or_else(|e| e);
                     let _ = writeln!(stream, "{result}");
                 } else {
@@ -296,7 +399,7 @@ impl ProcessManagerDaemon {
 
                     let _ = writeln!(stream, "Disable {app_name}");
                     // thread::sleep(Duration::from_millis(2000));
-                    self.config.lock().unwrap().enable(&params[0], false);
+                    self.config.lock().unwrap().enable(app_name, false);
 
                     let result = self.try_stop_app_by_name(app_name).unwrap_or_else(|e| e);
                     let _ = writeln!(stream, "{result}");
@@ -338,7 +441,7 @@ impl ProcessManagerDaemon {
                 for process_child in processes_table_lock.iter_mut() {
                     if let Ok(Some(_)) = process_child.child.try_wait() {
                         /* exited */
-                        eprintln!(
+                        println!(
                             "[pm][Info] {} exited! try to restart...",
                             process_child.name
                         );
@@ -348,17 +451,25 @@ impl ProcessManagerDaemon {
                             .unwrap()
                             .find_config(&process_child.name)
                         {
+                            app_config.exit_count += 1;
                             if let Ok(child) = Self::spawn_process(
                                 &app_config.cmd,
                                 &app_config.args,
                                 app_config
                                     .logdir
                                     .clone()
-                                    .unwrap_or("/tmp/".into())
+                                    .unwrap_or(DEFAULT_LOG_DIR.into())
                                     .join(app_config.name.clone() + ".log"),
                             ) {
                                 process_child.child = child;
+                            } else {
+                                eprintln!("[pm][Error] failed to restart {}", process_child.name);
                             }
+                        } else {
+                            eprintln!(
+                                "[pm][Error] why {} is in the process table but not in app configs?",
+                                process_child.name
+                            );
                         }
                     }
                 }
@@ -432,7 +543,7 @@ impl ProcessManagerDaemon {
                     app_config
                         .logdir
                         .clone()
-                        .unwrap_or("/tmp/".into())
+                        .unwrap_or(DEFAULT_LOG_DIR.into())
                         .join(app_config.name.clone() + ".log"),
                 ) {
                     self.processes_table.lock().unwrap().push(ProcessChild {
@@ -625,10 +736,10 @@ fn main_daemon(config_filepath: &path::Path) -> std::io::Result<()> {
     Ok(())
 }
 fn daemonize_self() -> std::io::Result<()> {
-    println!("Try to daemonize...");
+    println!("[pm][Info] Try to daemonize...");
     /* TODO: better daemon log dir */
-    let stdout = fs::File::create(env::home_dir().unwrap().join("pm-daemon.out")).unwrap();
-    let stderr = fs::File::create(env::home_dir().unwrap().join("pm-daemon.err")).unwrap();
+    let stdout = fs::File::create(env::home_dir().unwrap().join("pm-daemon.log")).unwrap();
+    // let stderr = fs::File::create(env::home_dir().unwrap().join("pm-daemon.err")).unwrap();
 
     let daemonize = daemonize::Daemonize::new()
         .pid_file("/tmp/pm-daemon.pid") // Every method except `new` and `start`
@@ -639,13 +750,13 @@ fn daemonize_self() -> std::io::Result<()> {
         // .group(2) // or group id.
         // .umask(0o777) // Set umask, `0o027` by default.
         .umask(0o000) // Set umask, `0o027` by default.
-        .stdout(stdout) // Redirect stdout to `/tmp/daemon.out`.
-        .stderr(stderr) // Redirect stderr to `/tmp/daemon.err`.
+        .stdout(stdout.try_clone()?) // Redirect stdout to `/tmp/daemon.out`.
+        .stderr(stdout) // Redirect stderr to `/tmp/daemon.err`.
         .privileged_action(|| "Executed before drop privileges");
 
     match daemonize.start() {
         Ok(_) => {
-            println!("Success, daemonized");
+            println!("[pm][Info] Success, daemonized");
             Ok(())
         }
         Err(error) => {

@@ -5,3 +5,11 @@ args = []
 cwd = "/"
 enabled = true
 logdir = "."
+
+[[apps]]
+name = "sl2"
+cmd = "sl"
+args = []
+cwd = "/"
+logdir = "."
+enabled = true
