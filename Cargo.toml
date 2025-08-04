@@ -12,6 +12,13 @@ nix          = { version = "*", features = ["signal"] }
 serde        = { version = "*", features = ["derive"] }
 toml         = "*"
 bincode      = "2.0.1"
+prettytable = "0.10.0"
+tabled = "0.20.0"
+ratatui = "0.29.0"
+color-eyre = "0.6.5"
+crossterm = "0.29.0"
+cursive = "0.21.1"
+termion = "4.0.5"
 
 
 # [[bin]]
@@ -37,3 +44,16 @@ path = "src/bin/try-file.rs"
 [[bin]]
 name = "try-slice"
 path = "src/bin/try-slice.rs"
+
+[[bin]]
+name = "try-ratatui"
+path = "src/bin/try-ratatui.rs"
+
+[[bin]]
+name = "try-crossterm"
+path = "src/bin/try-crossterm.rs"
+
+[[bin]]
+name = "try-cursive"
+path = "src/bin/try-cursive.rs"
+
