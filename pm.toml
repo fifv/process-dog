@@ -5,6 +5,7 @@ args = []
 cwd = "/"
 enabled = true
 logdir = "."
+kill_signal = "SIGTERM" # SIGTERM
 
 [[apps]]
 name = "sl2"

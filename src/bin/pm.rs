@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -63,9 +64,12 @@ pub struct AppConfig {
     pub cwd: path::PathBuf,
     pub enabled: bool,
     pub logdir: Option<path::PathBuf>,
+    pub kill_signal: Option<String>,
     #[serde(skip)]
     exit_count: i32,
 }
+
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     /* this allows .toml to be empty */
@@ -234,6 +238,7 @@ impl ProcessManagerDaemon {
                             cwd: PathBuf::from("/"), /* TODO: implement cwd */
                             enabled: true,
                             logdir: None,
+                            kill_signal: Some("SIGTERM".into()),
                             exit_count: 0,
                         });
                     }
@@ -313,6 +318,7 @@ impl ProcessManagerDaemon {
                         "Args",
                         "Cwd",
                         "Log Dir",
+                        "Kill Signal",
                     ]);
                     for (i, app) in self.config.lock().unwrap().apps.iter().enumerate() {
                         b.push_record([
@@ -341,6 +347,10 @@ impl ProcessManagerDaemon {
                                 .unwrap_or(&PathBuf::from(DEFAULT_LOG_DIR))
                                 .display()
                                 .to_string(),
+                            &app.kill_signal
+                                .as_ref()
+                                .unwrap_or(&"SIGTERM".to_string())
+                                .to_string(),
                         ]);
                     }
 
@@ -358,16 +368,21 @@ impl ProcessManagerDaemon {
                     } else {
                         self.config.lock().unwrap().apps[0].name.clone()
                     };
-                    let _ = writeln!(stream, "Restarting {app_name}... ");
+                    let _ = writeln!(stream, "[pm][Info] restarting {app_name}... ");
 
-                    let result = self.try_stop_app_by_name(app_name).unwrap_or_else(|e| e);
+                    let result = self
+                        .try_stop_app_by_name(app_name)
+                        .unwrap_or_else(|e| e.to_string());
                     let _ = writeln!(stream, "{result}");
 
                     let result = self.try_start_app_by_name(app_name).unwrap_or_else(|e| e);
                     let _ = writeln!(stream, "{result}");
                 } else {
                     // let _ = writeln!(stream, "usage: restart <name>");
-                    let _ = writeln!(stream, "No Apps available, please add with `add` first");
+                    let _ = writeln!(
+                        stream,
+                        "[pm][Warn] No Apps available, please add with `add` first"
+                    );
                 }
             }
             /* "enable" */
@@ -385,7 +400,10 @@ impl ProcessManagerDaemon {
                     let _ = writeln!(stream, "{result}");
                 } else {
                     // let _ = writeln!(stream, "usage: disable <name>");
-                    let _ = writeln!(stream, "No Apps available, please add with `add` first");
+                    let _ = writeln!(
+                        stream,
+                        "[pm][Warn] No Apps available, please add with `add` first"
+                    );
                 }
             }
             /* "disable" */
@@ -397,11 +415,13 @@ impl ProcessManagerDaemon {
                         self.config.lock().unwrap().apps[0].name.clone()
                     };
 
-                    let _ = writeln!(stream, "Disable {app_name}");
+                    let _ = writeln!(stream, "[pm][Info] disabling and stopping {app_name} ...");
                     // thread::sleep(Duration::from_millis(2000));
                     self.config.lock().unwrap().enable(app_name, false);
 
-                    let result = self.try_stop_app_by_name(app_name).unwrap_or_else(|e| e);
+                    let result = self
+                        .try_stop_app_by_name(app_name)
+                        .unwrap_or_else(|e| e.to_string());
                     let _ = writeln!(stream, "{result}");
 
                     /* this syntax also works, but... weird? */
@@ -410,19 +430,22 @@ impl ProcessManagerDaemon {
                     // });
                 } else {
                     // let _ = writeln!(stream, "usage: disable <name>");
-                    let _ = writeln!(stream, "No Apps available, please add with `add` first");
+                    let _ = writeln!(
+                        stream,
+                        "[pm][Warn] No Apps available, please add with `add` first"
+                    );
                 }
             }
             /* spawn all */
             "on" => {}
             "quit" => {
-                let _ = writeln!(stream, "Stop all...");
+                let _ = writeln!(stream, "[pm][Info] stopping all apps...");
                 self.stop_all_apps();
-                let _ = writeln!(stream, "Bye~");
+                let _ = writeln!(stream, "[pm][Info] all apps stopped");
                 std::process::exit(0);
             }
             cmd => {
-                let _ = writeln!(stream, "Unknown command: {cmd}");
+                let _ = writeln!(stream, "[pm][Warn] Unknown command: {cmd}");
             }
         }
     }
@@ -482,7 +505,7 @@ impl ProcessManagerDaemon {
         let config = self.config.lock().unwrap();
         for app_config in &config.apps {
             let res = self.try_start_app(&app_config);
-            println!("{}", res.unwrap_or_else(|e| e));
+            println!("{}", res.as_ref().unwrap_or_else(|e| e));
             match res {
                 Ok(o) => {
                     println!("{o}");
@@ -504,14 +527,14 @@ impl ProcessManagerDaemon {
     }
 
 
-    fn try_start_app_by_name(self: &Self, app_name: &str) -> Result<&'static str, &'static str> {
+    fn try_start_app_by_name(self: &Self, app_name: &str) -> Result<String, String> {
         let mut config_lock = self.config.lock().unwrap();
         let app_config = config_lock.find_config(&app_name);
         if let Some(app_config) = app_config {
             self.try_start_app(app_config)
             // let _ = try_start_process(app_config, processes_table.clone());
         } else {
-            Err("The App name can't be found in config")
+            Err(format!("The App name {app_name} can't be found in config"))
         }
     }
 
@@ -520,7 +543,7 @@ impl ProcessManagerDaemon {
      * 1. the app is enabled
      * 2. the app is not started (i.e. not in the table)
      */
-    fn try_start_app(self: &Self, app_config: &AppConfig) -> Result<&'static str, &'static str> {
+    fn try_start_app(self: &Self, app_config: &AppConfig) -> Result<String, String> {
         let app_name = &app_config.name;
         // let mut config_lock = config.lock().unwrap();
         // let app_config = config_lock.find_config(&app_name);
@@ -550,22 +573,35 @@ impl ProcessManagerDaemon {
                         name: app_name.to_string(),
                         child: child,
                     });
-                    Ok("Spawn successfully")
+                    Ok(format!("[pm][Info] {app_name} was spawned successfully"))
                 } else {
-                    Err("Spawn failed")
+                    Err(format!("[pm][Error] {app_name} was failed to spawn"))
                 }
             } else {
-                Err("The process has already been started")
+                Err(format!("[pm][Info] {app_name} has already been started"))
             }
         } else {
-            Err("The App is disabled")
+            Err(format!("[pm][Info] {app_name} is disabled"))
         }
         // } else {
         //     Err("The App name can't be found in config")
         // }
     }
 
-    fn try_stop_app_by_name(self: &Self, app_name: &str) -> Result<&'static str, &'static str> {
+    fn try_stop_app_by_name(self: &Self, app_name: &str) -> Result<String, &'static str> {
+        let signal = nix::sys::signal::Signal::from_str(
+            &self
+                .config
+                .lock()
+                .unwrap()
+                .find_config(&app_name)
+                .unwrap()
+                .kill_signal
+                .clone()
+                .unwrap_or("SIGTERM".into()),
+        )
+        .unwrap_or(nix::sys::signal::Signal::SIGTERM);
+
         let index_in_table = self
             .processes_table
             .lock()
@@ -580,16 +616,20 @@ impl ProcessManagerDaemon {
                 /* kill must borrow as mutable */
                 let _ = Self::nice_kill_process(
                     &mut table_lock[index].child,
+                    signal,
                     time::Duration::from_millis(2000),
                 );
             }
             self.processes_table.lock().unwrap().remove(index);
-            Ok("Kill successfully")
+            Ok(format!("[pm][Info] {app_name} was killed successfully"))
         } else {
-            Err("Seems not started, do nothing")
+            Err("[pm][Warn] Seems not started, do nothing")
         }
     }
 
+    /**
+     * low level process operations, don't depend on context
+     */
     fn spawn_process<S: AsRef<OsStr>, P: AsRef<Path>, I: IntoIterator<Item = S>>(
         program: S,
         args: I,
@@ -606,6 +646,7 @@ impl ProcessManagerDaemon {
 
     fn nice_kill_process(
         process: &mut std::process::Child,
+        signal: nix::sys::signal::Signal,
         nice_wait: time::Duration,
     ) -> Result<(), std::io::Error> {
         fn kill_process(process: &mut std::process::Child) -> Result<(), std::io::Error> {
@@ -618,7 +659,7 @@ impl ProcessManagerDaemon {
         }
 
         let pid = nix::unistd::Pid::from_raw(process.id() as i32);
-        match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT) {
+        match nix::sys::signal::kill(pid, signal) {
             // match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
             Ok(()) => {
                 let expire = time::Instant::now() + nice_wait;
@@ -736,7 +777,7 @@ fn main_daemon(config_filepath: &path::Path) -> std::io::Result<()> {
     Ok(())
 }
 fn daemonize_self() -> std::io::Result<()> {
-    println!("[pm][Info] Try to daemonize...");
+    println!("[pm][Info] try to start daemon");
     /* TODO: better daemon log dir */
     let stdout = fs::File::create(env::home_dir().unwrap().join("pm-daemon.log")).unwrap();
     // let stderr = fs::File::create(env::home_dir().unwrap().join("pm-daemon.err")).unwrap();
@@ -762,7 +803,7 @@ fn daemonize_self() -> std::io::Result<()> {
         Err(error) => {
             /* ugly hack */
             if error.to_string().contains("unable to lock pid file") {
-                eprintln!("[pm][Warn] Daemon may be already started, try to restart");
+                eprintln!("[pm][Warn] daemon may be already started, try to restart");
                 main_cli("quit", &[])?;
                 /* TODO: wait until quit finished */
 
